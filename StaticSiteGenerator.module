@@ -1,0 +1,347 @@
+<?php namespace ProcessWire;
+
+/**
+ *
+ * StaticSiteGenerator
+ *
+ * See README.md for usage instructions.
+ *
+ * @author Tabea David <td@kf-interactive.com>
+ * @version 1.0.0
+ * @copyright Copyright (c) 2018
+ * @see https://github.com/justb3a/processwire-staticsitegenerator
+ * @see http://www.processwire.com
+ */
+
+/**
+ * Class StaticSiteGenerator
+ */
+class StaticSiteGenerator extends Process implements Module, ConfigurableModule {
+
+  /**
+   * Retrieves module meta data
+   * Implementation of the Module interface
+   *
+   * @return array
+   * @see http://processwire.com/apigen/class-Module.html
+   */
+  public static function getModuleInfo() {
+    return array(
+      'title' => 'Static Site Generator',
+      'summary' => 'Generates an entirely static website.',
+      'version' => 100,
+      'href' => 'https://github.com/justb3a/processwire-staticsitegenerator',
+      'icon' => 'files-o'
+    );
+  }
+
+  const PAGE_NAME = 'staticsitegenerator';
+  const SUBMIT_NAME = 'submitSettings';
+
+  /**
+   * module config data
+   *
+   * @var array
+   */
+  protected $configData = array();
+
+  /**
+   * Needed to mark this module as configurable
+   * `isModuleConfiguralbe` returns integer 19
+   * if module is configurable via non-static getModuleConfigArray method
+   */
+  public function getModuleConfigArray() {
+    return array();
+  }
+
+  /**
+   * Initialize the module
+   *
+   * ProcessWire calls this when the module is loaded. For 'autoload' modules, this will be called
+   * when ProcessWire's API is ready. As a result, this is a good place to attach hooks.
+   */
+  public function init() {
+    parent::init(); // required
+    $this->configData = $this->modules->getModuleConfigData('StaticSiteGenerator');
+  }
+
+  /**
+   * initial screen
+   * module settings and Export-Button
+   */
+  public function ___execute() {
+    $output = '';
+    $exportLabel = $this->_('Export');
+    $introHeadline = $this->_('Export and Download');
+    $intro = $this->_('Click the button below to generate and download the static site version (.zip).');
+
+    // submit action: update module settings
+    if ($this->input->post[self::SUBMIT_NAME]) {
+      $this->configData['startPage'] = $this->wire('input')->post->startPage;
+      $this->wire('modules')->saveModuleConfigData('StaticSiteGenerator', $this->configData);
+    }
+
+    $output .= $this->renderForm();
+    $output .= "<h2>$introHeadline</h2>";
+    $output .= "<p>$intro</p>";
+    $output .= <<<EOT
+<a href="./export" title="$exportLabel">
+  <button class="ui-button ui-widget ui-corner-all ui-state-default ui-priority-secondary" name="button" value="Export" type="button">
+    <span class="ui-button-text">
+      <i class="fa fa-copy"></i>
+      $exportLabel
+    </span>
+  </button>
+</a>
+EOT;
+
+    return $output;
+  }
+
+  /**
+   * export static site
+   */
+  public function ___executeExport() {
+    $rootFolder = $this->config->paths->site . 'static';
+    $out = $this->saveAsStaticPages($rootFolder);
+    $out .= $this->zipExport($rootFolder);
+
+    if ($out) {
+      $output .= '<h3>' . $this->_('There were errors:') . '</h3>';
+      $output .= $out;
+    }
+
+    return $output;
+  }
+
+  /**
+   * save as static pages
+   *
+   * @param string $rootFolder
+   */
+  private function saveAsStaticPages($rootFolder) {
+    $output = '';
+    $startPage = $this->pages->get($this->configData['startPage']);
+
+    // remove and recreate base folder
+    if (is_dir($rootFolder)) $this->rrmdir($rootFolder);
+
+    if (mkdir($rootFolder, 0755)) {
+      // add basic folder structure for assets
+      $assetsFolder = $rootFolder . '/site/assets';
+      mkdir($assetsFolder, 0755, true);
+
+      // copy assets
+      $assets = array('css', 'files', 'fonts', 'img', 'js');
+      foreach ($assets as $folder) {
+        $assetFolder = $assetsFolder . DIRECTORY_SEPARATOR . $folder;
+        mkdir($assetFolder, 0755);
+        $this->copyRecursive($this->config->paths->assets . $folder, $assetFolder);
+      }
+
+      // add index.html
+      file_put_contents($rootFolder . '/index.html', $startPage->render());
+
+      // loop over childrens and save them to files
+      $this->savePagesRecursive($startPage, $rootFolder);
+    } else {
+      $error = error_get_last();
+      $output = '<span>- ' . $error['message'] . ": <code>$rootFolder</code></span><br />";
+    }
+
+    return $output;
+  }
+
+  /**
+   * zip export and offer as download
+   *
+   * @param string $rootFolder
+   */
+  private function zipExport($rootFolder) {
+    $output = '';
+    if (file_exists($rootFolder)) {
+      $tools = new WireFileTools;
+      $zip = $this->config->paths->cache . 'static-site.zip';
+      $result = $tools->zip($zip, $rootFolder, array('overwrite' => true));
+
+      if (count($result['errors'])) {
+        foreach($result['errors'] as $error) {
+          $output .= '<span>- ' . $this->sanitizer->entities($error) . '</span><br />';
+        }
+      } else {
+        $downloadOptions = array(
+          'exit' => true,
+          'forceDownload' => true,
+          'downloadFilename' => ''
+        );
+
+        session_write_close();
+
+        wireSendFile($zip, $downloadOptions);
+      }
+    } else {
+      $output .= '<span>- ' . $this->_('the following file does not exist:') . " <code>$rootFolder</code></span>";
+    }
+
+    return $output;
+  }
+
+  /**
+   * Render form - step 2
+   *
+   * @return string
+   */
+  public function renderForm() {
+    $form = $this->wire('modules')->get('InputfieldForm');
+    $form->action = './';
+    $form->method = 'post';
+
+    $fieldset = $this->wire('modules')->get('InputfieldFieldset');
+    $fieldset->label = 'Settings';
+    $fieldset->collapsed = Inputfield::collapsedYes;
+
+    $field = $this->modules->get('InputfieldPageListSelect');
+    $field->label = $this->_('Start Page');
+    $field->description = $this->_('Choose the starting point..');
+    $field->name = 'startPage';
+    $field->attr('value', $this->configData['startPage']);
+    $field->columnWidth = 100;
+    $field->required = true;
+    $fieldset->add($field);
+
+    $submit = $this->wire('modules')->get('InputfieldSubmit');
+    $submit->name = self::SUBMIT_NAME;
+    $submit->value = $this->_('Submit');
+    $fieldset->add($submit);
+
+    $form->add($fieldset);
+
+    return $form->render();
+  }
+
+  /**
+   * Recursively copy files from one directory to another
+   *
+   * @param String $src - Source of files being moved
+   * @param String $dest - Destination of files being moved
+   */
+  private function copyRecursive($src, $dest){
+    // if source is not a directory stop processing
+    if (!is_dir($src)) return false;
+
+    // if the destination directory does not exist create it
+    if (!is_dir($dest)) {
+      // if the destination directory could not be created stop processing
+      if (!mkdir($dest)) return false;
+    }
+
+    // open the source directory to read in files
+    $i = new \DirectoryIterator($src);
+    foreach ($i as $f) {
+      if ($f->isFile()) {
+        copy($f->getRealPath(), "$dest/" . $f->getFilename());
+      } else if (!$f->isDot() && $f->isDir()) {
+        $this->copyRecursive($f->getRealPath(), "$dest/$f");
+      }
+    }
+  }
+
+  /**
+   * Recursively delete files from a directory
+   *
+   * @param String $dir - Source of files being deleted
+   */
+  private function rrmdir($dir) {
+    if (is_dir($dir)) {
+      $objects = scandir($dir);
+      foreach ($objects as $object) {
+        if ($object !== '.' && $object !== '..') {
+
+          $current = "$dir/$object";
+          if (is_dir($current)) {
+            $this->rrmdir($current);
+          } else {
+            unlink($current);
+          }
+
+        }
+      }
+      rmdir($dir);
+    }
+  }
+
+  /**
+   * Save page to file
+   *
+   * @param Page $currentPage
+   * @param string $rootFolder
+   */
+  private function savePage($currentPage, $rootFolder) {
+    $pathArr = explode('/', trim($currentPage->path, '/'));
+    $numberOfParts = count($pathArr);
+    $currentFolder = $rootFolder;
+
+    $lastOne = $pathArr[$numberOfParts - 1];
+    unset($pathArr[$numberOfParts - 1]);
+
+    if (count($pathArr) > 0) {
+      $currentFolder = $rootFolder . DIRECTORY_SEPARATOR . implode(DIRECTORY_SEPARATOR, $pathArr);
+      if (!file_exists($currentFolder)) mkdir($currentFolder, 0755, true);
+    }
+
+    // create file
+    file_put_contents($currentFolder . DIRECTORY_SEPARATOR . $lastOne . '.html', $currentPage->render());
+  }
+
+  /**
+   * Recursively save page to file
+   *
+   * @param Page $currentPage
+   * @param string $rootFolder
+   */
+  private function savePagesRecursive($currentPage, $rootFolder) {
+    foreach ($currentPage->children() as $childPage) {
+      if (!$childPage->template->filenameExists()) continue;
+      $this->savePage($childPage, $rootFolder);
+      $this->savePagesRecursive($childPage, $rootFolder);
+    }
+  }
+  /**
+   * Install routine
+   * A new page with this Process module assigned is created.
+   *
+   */
+  public function ___install() {
+    $page = new Page();
+    $page->template = 'admin';
+    $page->name = self::PAGE_NAME;
+
+    $page->parent = $this->pages->get($this->config->adminRootPageID)->child('name=setup');
+    $page->process = $this;
+
+    $info = self::getModuleInfo();
+    $page->title = $info['title'];
+    $page->save();
+
+    $this->message("Created Page: {$page->path}");
+
+    $this->modules->saveModuleConfigData('StaticSiteGenerator', array('startPage' => $this->config->rootPageID));
+  }
+
+  /**
+   * Uninstall routine
+   *
+   * This should return the site to the same state
+   * it was in before the module was installed.
+   */
+  public function ___uninstall() {
+    $moduleID = $this->modules->getModuleID($this);
+    $page = $this->pages->get("template=admin, process=$moduleID, name=" . self::PAGE_NAME);
+
+    if ($page->id) {
+      $this->message("Deleting Page: {$page->path}");
+      $page->delete();
+    }
+  }
+
+}
